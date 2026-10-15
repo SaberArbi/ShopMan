@@ -158,6 +158,6 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 ---
 
 <p align="center">
-  Built with ☕, vibes, and a bigger dream in the background.<br>
+  Built with ☕, cigarettes, and a bigger dream in the background.<br>
   If this app helps your shop, that's the best kind of win. 🧡
 </p>
