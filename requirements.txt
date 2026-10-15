@@ -1,0 +1,7 @@
+# --- Required ---
+# (nothing strictly required — the app runs on the stdlib)
+
+# --- Optional but recommended ---
+Pillow>=10.0.0          # product photos
+arabic-reshaper>=3.0.0  # correct Arabic letter shaping in Tk
+python-bidi>=0.4.2      # RTL reordering for Arabic strings
