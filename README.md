@@ -143,7 +143,7 @@ stock_manager/
 - Receipt printing
 - CSV / Excel export
 - Stock-movement log (who changed what, and when)
-- Automated tests
+- Automated tests .
 
 Got another idea? Open an issue.
 
