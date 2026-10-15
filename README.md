@@ -138,7 +138,7 @@ stock_manager/
 - `create_tables()` in `database/schema.py` drops and recreates the `products` and `sales` tables. It only runs when the database is missing or has no `products` table, but be careful if you ever call it by hand.
 - Prices are in **DT** (Tunisian dinar). Changing currency means touching the locale files.
 
-## 🛣️ Ideas for later
+## 🛣️ Ideas for later :
 
 - Receipt printing
 - CSV / Excel export
