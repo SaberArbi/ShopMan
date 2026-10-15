@@ -1,40 +1,42 @@
+"""Backup: hourly, on exit, and after each sale. Keeps last 10."""
 import os
-from datetime import datetime
 import shutil
 import threading
 import time
+from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'stock.db')
-BACKUP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'backups')
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "stock.db")
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "backups")
 
-def do_backup():
-    """Perform a single backup"""
-    if not os.path.exists(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR)
-    
-    if os.path.exists(DB_PATH):
-        date = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file = os.path.join(BACKUP_DIR, f"auto_backup_{date}.db")
-        shutil.copy2(DB_PATH, backup_file)
-        
-        # Keep only last 10 backups
-        backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('auto_backup_')])
-        if len(backups) > 10:
-            for old in backups[:-10]:
-                os.remove(os.path.join(BACKUP_DIR, old))
-        return True
-    return False
+_KEEP = 10
+_PREFIX = "auto_backup_"
 
-def backup_loop():
-    """Run backup every hour"""
+
+def do_backup() -> bool:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    if not os.path.exists(DB_PATH):
+        return False
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = os.path.join(BACKUP_DIR, f"{_PREFIX}{stamp}.db")
+    shutil.copy2(DB_PATH, dest)
+
+    backups = sorted(f for f in os.listdir(BACKUP_DIR)
+                     if f.startswith(_PREFIX))
+    for old in backups[:-_KEEP]:
+        os.remove(os.path.join(BACKUP_DIR, old))
+    return True
+
+
+def _loop():
     while True:
-        time.sleep(3600)  # 1 hour
-        do_backup()
+        time.sleep(3600)
+        try:
+            do_backup()
+        except Exception as e:
+            print(f"Hourly backup failed: {e}")
 
-def start_auto_backup():
-    """Start backup thread"""
-    if not os.path.exists(BACKUP_DIR):
-        os.makedirs(BACKUP_DIR)
-    
-    thread = threading.Thread(target=backup_loop, daemon=True)
-    thread.start()
+
+def start_auto_backup() -> None:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    threading.Thread(target=_loop, daemon=True).start()

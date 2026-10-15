@@ -1,334 +1,207 @@
-# screens/history.py
+"""Sales history — filter, view, soft/hard delete, verify."""
 import tkinter as tk
-from tkinter import ttk, messagebox
-from datetime import datetime
+from tkinter import messagebox, ttk
 
-from database import db_operations as db
+from app import theme
+from database import db
+from database.errors import DomainError
+from screens.base import BaseScreen
+from screens.widgets import DateRangeFilter, ScrollableTreeview, build_topbar
 from utils import auth, i18n
 from utils.i18n import t
 
 
-class HistoryScreen:
-    def __init__(self, root, switch_callback, user=None):
-        self.root = root
-        self.switch = switch_callback
-        self.user = user
-        self.frame = tk.Frame(root, bg='#f0f0f0')
+class HistoryScreen(BaseScreen):
+    topbar_color = theme.DARK_LIGHT
 
+    def __init__(self, root, switch, user=None, logout=None):
         self._active_range = (None, None)
-        self.setup_ui()
-        self.filter_sales()
+        super().__init__(root, switch, user, logout=None)
+        self.apply_filter()
 
-    def _font(self, size, weight="normal"):
-        return i18n.ui_font(size, weight)
-
-    def setup_ui(self):
-        FONT_BOLD = self._font(10, 'bold')
-        FONT_BODY = self._font(9)
-
-        top = tk.Frame(self.frame, bg='#34495e', height=45)
-        top.pack(fill='x')
-        top.pack_propagate(False)
-
+    def build_topbar(self):
+        start, end = [], []
         if auth.can(self.user, "sell"):
-            tk.Button(top, text=t("nav.back_to_sales"), bg='#2c3e50', fg='white',
-                      font=FONT_BODY,
-                      command=lambda: self.switch('sales')
-                      ).pack(side=i18n.side_start(), padx=5, pady=8)
-
-        tk.Label(top, text=t("history.title"), bg='#34495e', fg='white',
-                 font=self._font(12, 'bold')).pack(side='top', pady=10)
-
+            start.append((t("nav.back_to_sales"), theme.DARK,
+                          lambda: self.switch("sales")))
         if auth.can(self.user, "view_deleted_sales"):
-            tk.Button(top, text=t("history.deleted_btn"), bg='#7f1d1d', fg='white',
-                      font=FONT_BODY,
-                      command=lambda: self.switch('deleted')
-                      ).pack(side=i18n.side_end(), padx=5, pady=8)
-
+            end.append((t("history.deleted_btn"), theme.RED_DARKER,
+                        lambda: self.switch("deleted")))
         if auth.can(self.user, "view_reports"):
-            tk.Button(top, text=t("nav.reports_arrow"), bg='#2c3e50', fg='white',
-                      font=FONT_BODY,
-                      command=lambda: self.switch('reports')
-                      ).pack(side=i18n.side_end(), padx=5, pady=8)
+            end.append((t("nav.reports_arrow"), theme.DARK,
+                        lambda: self.switch("reports")))
+        build_topbar(self.frame, color=self.topbar_color,
+                     title_key="history.title",
+                     buttons_start=start, buttons_end=end,
+                     logout_callback=self.logout)
 
-        main = tk.Frame(self.frame, bg='#f0f0f0')
-        main.pack(fill='both', expand=True, padx=5, pady=5)
 
-        filter_frame = tk.Frame(main, bg='white', relief='groove', bd=1)
-        filter_frame.pack(fill='x', pady=(0, 5))
+    def build_body(self):
+        main = tk.Frame(self.frame, bg=theme.BG)
+        main.pack(fill="both", expand=True, padx=5, pady=5)
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        self.filter = DateRangeFilter(
+            main, on_apply=self.apply_filter,
+            on_clear=self._clear_filter,
+            on_refresh=self.refresh,
+            show_verify=True, on_verify=self.verify_sales,
+        )
+        self.filter.pack(fill="x", pady=(0, 5))
 
-        # --- Start ---
-        start_frame = tk.Frame(filter_frame, bg='white')
-        start_frame.pack(side=i18n.side_start(), padx=10, pady=6)
-        tk.Label(start_frame, text=t("lbl.from"), bg='white',
-                 font=FONT_BODY).pack(side=i18n.side_start())
+        # summary labels attached to the filter's right side
+        summary = tk.Frame(self.filter, bg=theme.BG_CARD)
+        summary.pack(side=i18n.side_end(), padx=10, pady=6)
+        self.total_label = tk.Label(summary, text=f'{t("lbl.total")}: 0 DT',
+                                    bg=theme.BG_CARD, font=self.font(10, "bold"))
+        self.total_label.pack(side=i18n.side_start(), padx=5)
+        self.profit_label = tk.Label(summary, text=f'{t("lbl.profit")}: 0 DT',
+                                     bg=theme.BG_CARD, fg=theme.GREEN,
+                                     font=self.font(10, "bold"))
+        self.profit_label.pack(side=i18n.side_start(), padx=5)
+        self.count_label = tk.Label(summary, text=f'{t("lbl.sales_count")}: 0',
+                                    bg=theme.BG_CARD, font=self.font(10, "bold"))
+        self.count_label.pack(side=i18n.side_start(), padx=5)
 
-        self.start_date = tk.Entry(start_frame, width=10, font=FONT_BODY,
-                                   justify=i18n.justify_text())
-        self.start_date.pack(side=i18n.side_start(), padx=2)
-        self.start_date.insert(0, today)
+        self.tree_widget = ScrollableTreeview(
+            main,
+            columns=("date", "time", "count", "total", "profit"),
+            headings=[t("history.col_date"), t("history.col_time"),
+                      t("history.col_count"), t("history.col_total"),
+                      t("history.col_profit")],
+            widths=[110, 70, 70, 110, 110],
+        )
+        self.tree_widget.pack(fill="both", expand=True)
+        self.tree_widget.bind("<Double-1>", self.view_details)
+        self.tree = self.tree_widget.tree
 
-        self.start_time = tk.Entry(start_frame, width=5, font=FONT_BODY,
-                                   justify=i18n.justify_text())
-        self.start_time.pack(side=i18n.side_start(), padx=2)
-        self.start_time.insert(0, '00:00')
+        self._build_footer(main)
 
-        # --- End ---
-        end_frame = tk.Frame(filter_frame, bg='white')
-        end_frame.pack(side=i18n.side_start(), padx=10, pady=6)
-        tk.Label(end_frame, text=t("lbl.to"), bg='white',
-                 font=FONT_BODY).pack(side=i18n.side_start())
-
-        self.end_date = tk.Entry(end_frame, width=10, font=FONT_BODY,
-                                 justify=i18n.justify_text())
-        self.end_date.pack(side=i18n.side_start(), padx=2)
-        self.end_date.insert(0, today)
-
-        self.end_time = tk.Entry(end_frame, width=5, font=FONT_BODY,
-                                 justify=i18n.justify_text())
-        self.end_time.pack(side=i18n.side_start(), padx=2)
-        self.end_time.insert(0, '23:59')
-
-        tk.Button(filter_frame, text=t("btn.filter"), bg='#3498db', fg='white',
-                  font=FONT_BODY, command=self.filter_sales
-                  ).pack(side=i18n.side_start(), padx=5)
-        tk.Button(filter_frame, text=t("btn.clear_filter"), bg='#95a5a6', fg='white',
-                  font=FONT_BODY, command=self.clear_filter
-                  ).pack(side=i18n.side_start(), padx=5)
-        tk.Button(filter_frame, text=t("btn.refresh"), bg='#3498db', fg='white',
-                  font=FONT_BODY, width=2, command=self.refresh
-                  ).pack(side=i18n.side_start(), padx=5)
-        tk.Button(filter_frame, text=t("btn.verify"), bg='#f39c12', fg='white',
-                  font=FONT_BODY, command=self.verify_sales
-                  ).pack(side=i18n.side_start(), padx=5)
-
-        summary_frame = tk.Frame(filter_frame, bg='white')
-        summary_frame.pack(side=i18n.side_end(), padx=10, pady=6)
-        self.total_sales_label = tk.Label(summary_frame,
-                                          text=f'{t("lbl.total")}: 0 DT',
-                                          bg='white', font=FONT_BOLD)
-        self.total_sales_label.pack(side=i18n.side_start(), padx=5)
-        self.total_profit_label = tk.Label(summary_frame,
-                                           text=f'{t("lbl.profit")}: 0 DT',
-                                           bg='white', font=FONT_BOLD,
-                                           fg='#27ae60')
-        self.total_profit_label.pack(side=i18n.side_start(), padx=5)
-        self.trans_count_label = tk.Label(summary_frame,
-                                          text=f'{t("lbl.sales_count")}: 0',
-                                          bg='white', font=FONT_BOLD)
-        self.trans_count_label.pack(side=i18n.side_start(), padx=5)
-
-        tree_container = tk.Frame(main, bg='white', relief='groove', bd=1)
-        tree_container.pack(fill='both', expand=True)
-
-        columns = ('date', 'time', 'count', 'total', 'profit')
-        self.tree = ttk.Treeview(tree_container, columns=columns,
-                                 show='headings',
-                                 selectmode='extended', height=20)
-        headings = [
-            t("history.col_date"), t("history.col_time"),
-            t("history.col_count"), t("history.col_total"),
-            t("history.col_profit"),
-        ]
-        col_widths = [110, 70, 70, 110, 110]
-        for col, hdr, width in zip(columns, headings, col_widths):
-            self.tree.heading(col, text=hdr)
-            self.tree.column(col, width=width, anchor='center')
-
-        v_scroll = ttk.Scrollbar(tree_container, orient='vertical',
-                                 command=self.tree.yview)
-        h_scroll = ttk.Scrollbar(tree_container, orient='horizontal',
-                                 command=self.tree.xview)
-        self.tree.configure(yscrollcommand=v_scroll.set,
-                            xscrollcommand=h_scroll.set)
-
-        self.tree.grid(row=0, column=0, sticky='nsew')
-        v_scroll.grid(row=0, column=1, sticky='ns')
-        h_scroll.grid(row=1, column=0, sticky='ew')
-        tree_container.grid_rowconfigure(0, weight=1)
-        tree_container.grid_columnconfigure(0, weight=1)
-
-        self.tree.bind('<Double-1>', self.view_details)
-
-        btn_frame = tk.Frame(main, bg='#f0f0f0')
-        btn_frame.pack(fill='x', pady=5)
-
+    def _build_footer(self, parent):
+        footer = tk.Frame(parent, bg=theme.BG)
+        footer.pack(fill="x", pady=5)
         if auth.can(self.user, "soft_delete_sale"):
-            tk.Button(btn_frame, text=t("history.btn_soft_delete"),
-                      bg='#e67e22', fg='white',
-                      font=self._font(10), width=18,
+            tk.Button(footer, text=t("history.btn_soft_delete"),
+                      bg=theme.ORANGE, fg="white",
+                      font=self.font(10), width=18,
                       command=self.delete_selected_soft
                       ).pack(side=i18n.side_start(), padx=5)
-
         if auth.can(self.user, "hard_delete_sale"):
-            tk.Button(btn_frame, text=t("history.btn_hard_delete"),
-                      bg='#e74c3c', fg='white',
-                      font=self._font(10), width=22,
+            tk.Button(footer, text=t("history.btn_hard_delete"),
+                      bg=theme.RED, fg="white",
+                      font=self.font(10), width=22,
                       command=self.delete_selected_hard
                       ).pack(side=i18n.side_start(), padx=5)
-
-        tk.Button(btn_frame, text=t("btn.details_sale"), bg='#3498db', fg='white',
-                  font=self._font(10), width=15,
+        tk.Button(footer, text=t("btn.details_sale"), bg=theme.BLUE, fg="white",
+                  font=self.font(10), width=15,
                   command=self.show_details_selected
                   ).pack(side=i18n.side_start(), padx=5)
-
-        tk.Label(btn_frame, text=t("history.hint"),
-                 bg='#f0f0f0', fg='#e67e22',
-                 font=FONT_BODY).pack(side=i18n.side_end(), padx=5)
+        tk.Label(footer, text=t("history.hint"), bg=theme.BG, fg=theme.ORANGE,
+                 font=self.font(9)).pack(side=i18n.side_end(), padx=5)
 
     # ------------------------------------------------------------------
     def load_history(self, start_dt=None, end_dt=None):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-
+        self.tree_widget.clear()
         self._active_range = (start_dt, end_dt)
         groups = db.get_grouped_sales(start_dt, end_dt)
-
-        total_amount = 0.0
-        total_profit = 0.0
-
+        total_amount = total_profit = 0.0
         for timestamp, count, amount, profit in groups:
             date_part = timestamp[:10]
-            time_part = timestamp[11:16] if len(timestamp) > 16 else timestamp[11:]
-
-            self.tree.insert('', 'end', values=(
-                date_part, time_part, count,
-                f"{amount:.2f}", f"{profit:.2f}",
-            ), tags=(timestamp,))
-
+            time_part = (timestamp[11:16] if len(timestamp) > 16
+                         else timestamp[11:])
+            self.tree_widget.insert_row(
+                (date_part, time_part, count, f"{amount:.2f}", f"{profit:.2f}"),
+                tags=(timestamp,))
             total_amount += amount
             total_profit += profit
 
-        self.total_sales_label.config(
-            text=f'{t("lbl.total")}: {total_amount:.2f} DT')
-        self.total_profit_label.config(
-            text=f'{t("lbl.profit")}: {total_profit:.2f} DT')
-        self.trans_count_label.config(
-            text=f'{t("lbl.sales_count")}: {len(groups)}')
+        self.total_label.config(text=f'{t("lbl.total")}: {total_amount:.2f} DT')
+        self.profit_label.config(text=f'{t("lbl.profit")}: {total_profit:.2f} DT')
+        self.count_label.config(text=f'{t("lbl.sales_count")}: {len(groups)}')
 
-    def filter_sales(self):
+    def apply_filter(self):
         try:
-            start_str = f"{self.start_date.get().strip()} {self.start_time.get().strip()}:00"
-            end_str = f"{self.end_date.get().strip()} {self.end_time.get().strip()}:59"
-            datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-            datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            messagebox.showerror(t("msg.error"), t("reports.invalid_datetime"))
+            start, end = self.filter.get_range()
+        except ValueError as e:
+            messagebox.showerror(t("msg.error"), str(e))
             return
+        self.load_history(start, end)
 
-        if start_str > end_str:
-            messagebox.showerror(t("msg.error"), t("reports.start_after_end"))
-            return
-
-        self.load_history(start_str, end_str)
-
-    def clear_filter(self):
-        today = datetime.now().strftime('%Y-%m-%d')
-        for entry, value in (
-            (self.start_date, today), (self.start_time, '00:00'),
-            (self.end_date, today),   (self.end_time, '23:59'),
-        ):
-            entry.delete(0, tk.END)
-            entry.insert(0, value)
-        self.filter_sales()
+    def _clear_filter(self):
+        self.apply_filter()
 
     def refresh(self):
         self.load_history(*self._active_range)
-
-    # ------------------------------------------------------------------
-    def get_selected_timestamps(self):
-        timestamps = []
-        for item in self.tree.selection():
-            tags = self.tree.item(item, 'tags')
-            if tags:
-                timestamps.append(tags[0])
-        return timestamps
 
     # ------------------------------------------------------------------
     def delete_selected_soft(self):
         if not auth.can(self.user, "soft_delete_sale"):
             messagebox.showerror(t("msg.access_denied"), t("msg.no_permission"))
             return
-
-        timestamps = self.get_selected_timestamps()
-        if not timestamps:
+        stamps = self.tree_widget.selection_tags()
+        if not stamps:
             messagebox.showwarning(t("msg.warning"),
                                    t("history.select_to_delete"))
             return
-
-        if not messagebox.askyesno(
-            t("msg.confirmation"),
-            t("history.confirm_soft", n=len(timestamps))
-        ):
+        if not messagebox.askyesno(t("msg.confirmation"),
+                                   t("history.confirm_soft", n=len(stamps))):
             return
-
         errors = []
-        for ts in timestamps:
+        for ts in stamps:
             try:
-                db.soft_delete_sales_by_timestamp(ts, self.user['id'])
+                db.soft_delete_sales_by_timestamp(ts, self.user["id"])
+            except DomainError as e:
+                errors.append(f"{ts}: {t(e.key, **e.kwargs)}")
             except Exception as e:
                 errors.append(f"{ts}: {e}")
-
-        if errors:
-            messagebox.showerror(t("msg.error"), '\n'.join(errors[:5]))
-        else:
-            messagebox.showinfo(t("msg.success"),
-                                t("history.deleted_ok", n=len(timestamps)))
-
-        self.refresh()
+        self._report_bulk(errors, stamps)
 
     def delete_selected_hard(self):
         if not auth.can(self.user, "hard_delete_sale"):
             messagebox.showerror(t("msg.access_denied"),
                                  t("history.owner_only_hard"))
             return
-
-        timestamps = self.get_selected_timestamps()
-        if not timestamps:
+        stamps = self.tree_widget.selection_tags()
+        if not stamps:
             messagebox.showwarning(t("msg.warning"),
                                    t("history.select_to_delete"))
             return
-
-        if not messagebox.askyesno(
-            t("msg.confirmation"),
-            t("history.confirm_hard", n=len(timestamps))
-        ):
+        if not messagebox.askyesno(t("msg.confirmation"),
+                                   t("history.confirm_hard", n=len(stamps))):
             return
-
         errors = []
-        for ts in timestamps:
+        for ts in stamps:
             try:
                 db.hard_delete_sales_by_timestamp(ts)
+            except DomainError as e:
+                errors.append(f"{ts}: {t(e.key, **e.kwargs)}")
             except Exception as e:
                 errors.append(f"{ts}: {e}")
+        self._report_bulk(errors, stamps)
 
+    def _report_bulk(self, errors, stamps):
         if errors:
-            messagebox.showerror(t("msg.error"), '\n'.join(errors[:5]))
+            messagebox.showerror(t("msg.error"), "\n".join(errors[:5]))
         else:
             messagebox.showinfo(t("msg.success"),
-                                t("history.deleted_ok", n=len(timestamps)))
-
+                                t("history.deleted_ok", n=len(stamps)))
         self.refresh()
 
     # ------------------------------------------------------------------
     def show_details_selected(self):
-        timestamps = self.get_selected_timestamps()
-        if not timestamps:
+        stamps = self.tree_widget.selection_tags()
+        if not stamps:
             messagebox.showwarning(t("msg.warning"), t("history.select_sale"))
             return
-        self.show_details_for_timestamp(timestamps[0])
+        self.show_details_for_timestamp(stamps[0])
 
     def view_details(self, event=None):
-        selected = self.tree.selection()
-        if selected:
-            ts = self.tree.item(selected[0], 'tags')[0]
+        sel = self.tree.selection()
+        if sel:
+            ts = self.tree.item(sel[0], "tags")[0]
             self.show_details_for_timestamp(ts)
 
     def show_details_for_timestamp(self, timestamp):
-        sales = db.get_sales_by_timestamp(timestamp)
-        if not sales:
+        if not db.get_sales_by_timestamp(timestamp):
             messagebox.showinfo(t("msg.info"), t("history.no_items"))
             return
 
@@ -340,46 +213,41 @@ class HistoryScreen:
         popup.grab_set()
 
         tk.Label(popup, text=t("history.sale_of", ts=timestamp),
-                 font=self._font(12, 'bold')).pack(pady=6)
+                 font=self.font(12, "bold")).pack(pady=6)
 
-        columns = ('id', 'product', 'qty', 'unit', 'total', 'profit')
-        tree = ttk.Treeview(popup, columns=columns, show='headings', height=10)
-        headings = {
-            'id': (t("history.col_id"), 0),
-            'product': (t("history.col_product"), 220),
-            'qty': (t("history.col_qty"), 80),
-            'unit': (t("history.col_unit"), 70),
-            'total': (t("history.col_total"), 80),
-            'profit': (t("history.col_profit"), 80),
-        }
-        for col, (label, width) in headings.items():
+        columns = ("id", "product", "qty", "unit", "total", "profit")
+        tree = ttk.Treeview(popup, columns=columns, show="headings", height=10)
+        for col, label, w, anchor, stretch in (
+            ("id", t("history.col_id"), 0, "center", False),
+            ("product", t("history.col_product"), 220, i18n.anchor_start(), True),
+            ("qty", t("history.col_qty"), 80, "center", False),
+            ("unit", t("history.col_unit"), 70, "center", False),
+            ("total", t("history.col_total"), 80, "center", False),
+            ("profit", t("history.col_profit"), 80, "center", False),
+        ):
             tree.heading(col, text=label)
-            tree.column(col, width=width,
-                        anchor='center' if col != 'product' else i18n.anchor_start(),
-                        stretch=(col == 'product'))
-        tree.pack(fill='both', expand=True, padx=10, pady=(0, 5))
+            tree.column(col, width=w, anchor=anchor, stretch=stretch)
+        tree.pack(fill="both", expand=True, padx=10, pady=(0, 5))
 
         summary = tk.Frame(popup)
-        summary.pack(fill='x', padx=10, pady=5)
-        total_lbl = tk.Label(summary, text="", font=self._font(10, 'bold'))
+        summary.pack(fill="x", padx=10, pady=5)
+        total_lbl = tk.Label(summary, text="", font=self.font(10, "bold"))
         total_lbl.pack(side=i18n.side_start(), padx=10)
-        profit_lbl = tk.Label(summary, text="", font=self._font(10, 'bold'),
-                              fg='#27ae60')
+        profit_lbl = tk.Label(summary, text="", font=self.font(10, "bold"),
+                              fg=theme.GREEN)
         profit_lbl.pack(side=i18n.side_start(), padx=10)
 
         def rebuild():
             for row in tree.get_children():
                 tree.delete(row)
             rows = db.get_sales_by_timestamp(timestamp)
-            tot = 0.0
-            prof = 0.0
+            tot = prof = 0.0
             for sale_id, product, qty, unit, total, profit in rows:
-                qty_str = (f"{qty:.0f} g" if unit in ('gram', 'g')
+                qty_str = (f"{qty:.0f} g" if unit in ("gram", "g")
                            else f"{qty:.0f}")
-                tree.insert('', 'end', values=(
+                tree.insert("", "end", values=(
                     sale_id, product[:34], qty_str, unit,
-                    f"{total:.2f} DT", f"{profit:.2f} DT",
-                ))
+                    f"{total:.2f} DT", f"{profit:.2f} DT"))
                 tot += total
                 prof += profit
             total_lbl.config(text=f"{t('lbl.total')}: {tot:.2f} DT")
@@ -392,17 +260,13 @@ class HistoryScreen:
 
         rebuild()
 
-        btn_frame = tk.Frame(popup)
-        btn_frame.pack(fill='x', padx=10, pady=(0, 8))
-
         def delete_selected_item():
-            selected = tree.selection()
-            if not selected:
+            sel = tree.selection()
+            if not sel:
                 messagebox.showwarning(t("msg.warning"),
                                        t("deleted.select_item"), parent=popup)
                 return
-            sale_id = tree.item(selected[0])['values'][0]
-
+            sale_id = tree.item(sel[0])["values"][0]
             if auth.can(self.user, "hard_delete_sale"):
                 if not messagebox.askyesno(
                     t("msg.confirmation"),
@@ -419,7 +283,7 @@ class HistoryScreen:
                     t("history.delete_item_confirm"), parent=popup):
                     return
                 try:
-                    db.soft_delete_sale(sale_id, self.user['id'])
+                    db.soft_delete_sale(sale_id, self.user["id"])
                 except Exception as e:
                     messagebox.showerror(t("msg.error"), str(e), parent=popup)
                     return
@@ -430,36 +294,33 @@ class HistoryScreen:
             self.refresh()
             rebuild()
 
+        btns = tk.Frame(popup)
+        btns.pack(fill="x", padx=10, pady=(0, 8))
         if auth.can(self.user, "soft_delete_sale"):
             label = (t("history.btn_hard_delete")
                      if auth.can(self.user, "hard_delete_sale")
                      else t("history.delete_item"))
-            tk.Button(btn_frame, text=label,
-                      bg='#e74c3c', fg='white',
+            tk.Button(btns, text=label, bg=theme.RED, fg="white",
                       command=delete_selected_item
                       ).pack(side=i18n.side_start(), padx=5)
-
-        tk.Button(btn_frame, text=t("btn.close"), bg='#95a5a6', fg='white',
+        tk.Button(btns, text=t("btn.close"), bg=theme.GRAY, fg="white",
                   command=popup.destroy).pack(side=i18n.side_end(), padx=5)
 
     # ------------------------------------------------------------------
     def verify_sales(self):
-        all_total, all_profit, grouped_total, grouped_profit = \
-            db.verify_sales_aggregates()
-        ok = abs(all_total - grouped_total) < 0.01
+        at, ap, gt, gp = db.verify_sales_aggregates()
+        ok = abs(at - gt) < 0.01
         messagebox.showinfo(
             t("history.verify_title"),
-            t("history.verify_total", t=all_total) + "\n"
-            + t("history.verify_grouped", t=grouped_total) + "\n"
-            + t("history.verify_profit", p=all_profit) + "\n"
-            + t("history.verify_grouped_profit", p=grouped_profit) + "\n\n"
-            + (t("history.verify_ok") if ok else t("history.verify_bad"))
+            "\n".join((
+                t("history.verify_total", t=at),
+                t("history.verify_grouped", t=gt),
+                t("history.verify_profit", p=ap),
+                t("history.verify_grouped_profit", p=gp),
+                "",
+                t("history.verify_ok") if ok else t("history.verify_bad"),
+            )),
         )
 
-    # ------------------------------------------------------------------
-    def show(self):
-        self.frame.pack(fill='both', expand=True)
+    def on_show(self):
         self.refresh()
-
-    def hide(self):
-        self.frame.pack_forget()
